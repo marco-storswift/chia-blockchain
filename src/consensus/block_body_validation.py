@@ -13,22 +13,29 @@ from src.consensus.blockchain_check_conditions import blockchain_check_condition
 from src.consensus.blockchain_interface import BlockchainInterface
 from src.consensus.coinbase import create_farmer_coin, create_pool_coin
 from src.consensus.constants import ConsensusConstants
-from src.consensus.cost_calculator import CostResult, calculate_cost_of_program
+from src.consensus.cost_calculator import NPCResult, calculate_cost_of_program
 from src.consensus.find_fork_point import find_fork_point_in_chain
 from src.consensus.network_type import NetworkType
 from src.full_node.block_store import BlockStore
 from src.full_node.coin_store import CoinStore
+from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
 from src.types.announcement import Announcement
 from src.types.blockchain_format.coin import Coin
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.coin_record import CoinRecord
 from src.types.condition_opcodes import ConditionOpcode
 from src.types.condition_var_pair import ConditionVarPair
-from src.types.full_block import FullBlock, additions_for_npc, announcements_for_npc
+from src.types.full_block import FullBlock
 from src.types.name_puzzle_condition import NPC
 from src.types.unfinished_block import UnfinishedBlock
 from src.util.condition_tools import pkm_pairs_for_conditions_dict
 from src.util.errors import Err
+from src.util.generator_tools import (
+    additions_for_npc,
+    announcements_for_npc,
+    block_removals_and_additions,
+    tx_removals_and_additions,
+)
 from src.util.hash import std_hash
 from src.util.ints import uint32, uint64
 
@@ -43,9 +50,9 @@ async def validate_block_body(
     peak: Optional[BlockRecord],
     block: Union[FullBlock, UnfinishedBlock],
     height: uint32,
-    cached_cost_result: Optional[CostResult] = None,
+    npc_result: Optional[NPCResult],
     fork_point_with_peak: Optional[uint32] = None,
-) -> Tuple[Optional[Err], Optional[CostResult]]:
+) -> Tuple[Optional[Err], Optional[NPCResult]]:
     """
     This assumes the header block has been completely validated.
     Validates the transactions and body of the block. Returns None for the first value if everything
@@ -168,19 +175,18 @@ async def validate_block_body(
 
         if block.transactions_generator is not None:
             # Get List of names removed, puzzles hashes for removed coins and conditions crated
-            if cached_cost_result is not None:
-                result: Optional[CostResult] = cached_cost_result
-            else:
-                result = calculate_cost_of_program(block.transactions_generator, constants.CLVM_COST_RATIO_CONSTANT)
-            assert result is not None
-            cost = result.cost
-            npc_list = result.npc_list
+
+            assert npc_result is not None
+            cost = calculate_cost_of_program(
+                block.transactions_generator, npc_result, constants.CLVM_COST_RATIO_CONSTANT
+            )
+            npc_list = npc_result.npc_list
 
             # 8. Check that cost <= MAX_BLOCK_COST_CLVM
             if cost > constants.MAX_BLOCK_COST_CLVM:
                 return Err.BLOCK_COST_EXCEEDS_MAX, None
-            if result.error is not None:
-                return Err(result.error), None
+            if npc_result.error is not None:
+                return Err.GENERATOR_RUNTIME_ERROR, None
 
             for npc in npc_list:
                 removals.append(npc.coin_name)
@@ -261,11 +267,30 @@ async def validate_block_body(
         coinbases_since_fork: Dict[bytes32, uint32] = {}
 
         if height > 0:
-            curr: Optional[FullBlock] = await block_store.get_full_block(block.prev_header_hash)
+            prev_block: Optional[FullBlock] = await block_store.get_full_block(block.prev_header_hash)
+            reorg_blocks: Dict[int, FullBlock] = {}
+            curr: Optional[FullBlock] = prev_block
             assert curr is not None
-
+            reorg_blocks[curr.height] = curr
             while curr.height > fork_h:
-                removals_in_curr, additions_in_curr = curr.tx_removals_and_additions()
+                curr = await block_store.get_full_block(curr.prev_header_hash)
+                assert curr is not None
+                reorg_blocks[curr.height] = curr
+                if curr.height == 0:
+                    break
+
+            curr = prev_block
+            assert curr is not None
+            while curr.height > fork_h:
+                # Coin store doesn't contain coins from fork, we have to run generator for each block in fork
+                # TODO pass previous generators into get_name_puzzle_conditions
+                if curr.transactions_generator is not None:
+                    npc_result = get_name_puzzle_conditions(curr.transactions_generator, False)
+                    removals_in_curr, additions_in_curr = tx_removals_and_additions(npc_result.npc_list)
+                else:
+                    removals_in_curr = []
+                    additions_in_curr = []
+
                 for c_name in removals_in_curr:
                     removals_since_fork.add(c_name)
                 for c in additions_in_curr:
@@ -276,7 +301,7 @@ async def validate_block_body(
                     coinbases_since_fork[coinbase_coin.name()] = curr.height
                 if curr.height == 0:
                     break
-                curr = await block_store.get_full_block(curr.prev_header_hash)
+                curr = reorg_blocks[curr.height - 1]
                 assert curr is not None
 
         removal_coin_records: Dict[bytes32, CoinRecord] = {}

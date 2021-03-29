@@ -11,15 +11,20 @@ from src.consensus.block_header_validation import validate_finished_header_block
 from src.consensus.block_record import BlockRecord
 from src.consensus.blockchain_interface import BlockchainInterface
 from src.consensus.constants import ConsensusConstants
+from src.consensus.cost_calculator import NPCResult
 from src.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
 from src.consensus.find_fork_point import find_fork_point_in_chain
 from src.consensus.full_block_to_block_record import block_to_block_record
 from src.consensus.multiprocess_validation import PreValidationResult, pre_validate_blocks_multiprocessing
 from src.full_node.block_store import BlockStore
 from src.full_node.coin_store import CoinStore
+from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
+from src.types.blockchain_format.coin import Coin
+from src.types.blockchain_format.program import SerializedProgram
 from src.types.blockchain_format.sized_bytes import bytes32
 from src.types.blockchain_format.sub_epoch_summary import SubEpochSummary
 from src.types.blockchain_format.vdf import VDFInfo
+from src.types.coin_record import CoinRecord
 from src.types.end_of_slot_bundle import EndOfSubSlotBundle
 from src.types.full_block import FullBlock
 from src.types.header_block import HeaderBlock
@@ -27,6 +32,7 @@ from src.types.unfinished_block import UnfinishedBlock
 from src.types.unfinished_header_block import UnfinishedHeaderBlock
 from src.types.weight_proof import SubEpochChallengeSegment
 from src.util.errors import Err
+from src.util.generator_tools import get_block_header, block_removals_and_additions
 from src.util.ints import uint16, uint32, uint64, uint128
 from src.util.streamable import recurse_jsonify
 
@@ -189,6 +195,7 @@ class Blockchain(BlockchainInterface):
         if not genesis and (self.block_record(block.prev_header_hash).height + 1) != block.height:
             return ReceiveBlockResult.INVALID_BLOCK, Err.INVALID_HEIGHT, None
 
+        npc_result: Optional[NPCResult] = None
         if pre_validation_result is None:
             if block.height == 0:
                 prev_b: Optional[BlockRecord] = None
@@ -197,10 +204,24 @@ class Blockchain(BlockchainInterface):
             sub_slot_iters, difficulty = get_next_sub_slot_iters_and_difficulty(
                 self.constants, len(block.finished_sub_slots) > 0, prev_b, self
             )
+
+            if block.is_transaction_block():
+                prev_generators: List[SerializedProgram] = []
+                # TODO Fetch transaction generators
+                if block.transactions_generator is not None:
+                    npc_result = get_name_puzzle_conditions(block.transactions_generator, False, prev_generators)
+                    removals, additions = block_removals_and_additions(block, npc_result.npc_list)
+                else:
+                    removals, additions = [], list(block.get_included_reward_coins())
+                header_block = get_block_header(block, additions, removals)
+            else:
+                npc_result = None
+                header_block = get_block_header(block, [], [])
+
             required_iters, error = validate_finished_header_block(
                 self.constants,
                 self,
-                block.get_block_header(),
+                header_block,
                 False,
                 difficulty,
                 sub_slot_iters,
@@ -209,6 +230,7 @@ class Blockchain(BlockchainInterface):
             if error is not None:
                 return ReceiveBlockResult.INVALID_BLOCK, error.code, None
         else:
+            npc_result = pre_validation_result.npc_result
             required_iters = pre_validation_result.required_iters
             assert pre_validation_result.error is None
         assert required_iters is not None
@@ -220,7 +242,7 @@ class Blockchain(BlockchainInterface):
             self.get_peak(),
             block,
             block.height,
-            pre_validation_result.cost_result if pre_validation_result is not None else None,
+            npc_result,
             fork_point_with_peak,
         )
         if error_code is not None:
@@ -238,7 +260,9 @@ class Blockchain(BlockchainInterface):
 
         self.add_block_record(block_record)
 
-        fork_height: Optional[uint32] = await self._reconsider_peak(block_record, genesis, fork_point_with_peak)
+        fork_height: Optional[uint32] = await self._reconsider_peak(
+            block_record, genesis, fork_point_with_peak, npc_result
+        )
 
         if fork_height is not None:
             return ReceiveBlockResult.NEW_PEAK, None, fork_height
@@ -246,7 +270,11 @@ class Blockchain(BlockchainInterface):
             return ReceiveBlockResult.ADDED_AS_ORPHAN, None, None
 
     async def _reconsider_peak(
-        self, block_record: BlockRecord, genesis: bool, fork_point_with_peak: Optional[uint32]
+        self,
+        block_record: BlockRecord,
+        genesis: bool,
+        fork_point_with_peak: Optional[uint32],
+        npc_result: Optional[NPCResult],
     ) -> Optional[uint32]:
         """
         When a new block is added, this is called, to check if the new block is the new peak of the chain.
@@ -264,7 +292,12 @@ class Blockchain(BlockchainInterface):
                 # in sync.
                 await self.block_store.begin_transaction()
                 try:
-                    await self.coin_store.new_block(block)
+                    if npc_result is not None:
+                        removals, additions = block_removals_and_additions(block, npc_result.npc_list)
+                    else:
+                        removals = []
+                        additions = list(block.get_included_reward_coins())
+                    await self.coin_store.new_block(block, additions, removals)
                     self.__height_to_hash[uint32(0)] = block.header_hash
                     self._peak_height = uint32(0)
                     await self.block_store.set_peak(block.header_hash)
@@ -322,7 +355,8 @@ class Blockchain(BlockchainInterface):
                 for fetched_full_block, fetched_block_record in reversed(blocks_to_add):
                     self.__height_to_hash[fetched_block_record.height] = fetched_block_record.header_hash
                     if fetched_block_record.is_transaction_block:
-                        await self.coin_store.new_block(fetched_full_block)
+                        removals, additions = await self.get_removals_and_additions(fetched_full_block)
+                        await self.coin_store.new_block(fetched_full_block, additions, removals)
                     if fetched_block_record.sub_epoch_summary_included is not None:
                         self.__sub_epoch_summaries[
                             fetched_block_record.height
@@ -340,6 +374,27 @@ class Blockchain(BlockchainInterface):
 
         # This is not a heavier block than the heaviest we have seen, so we don't change the coin set
         return None
+
+    async def get_removals_and_additions(self, block: FullBlock) -> Tuple[List[bytes32], List[Coin]]:
+        if block.is_transaction_block():
+            if block.transactions_generator is not None:
+                prev_generators = []
+                if len(block.transactions_generator_ref_list) > 0:
+                    hashes = []
+                    for height in block.transactions_generator_ref_list:
+                        hash = self.height_to_hash(height)
+                        hashes.append(hash)
+                    blocks = await self.block_store.get_blocks_by_hash(hashes)
+                    for b in blocks:
+                        prev_generators.append(b.transactions_generator)
+
+                npc_result = get_name_puzzle_conditions(block.transactions_generator, False, prev_generators)
+                removals, additions = block_removals_and_additions(block, npc_result.npc_list)
+                return removals, additions
+            else:
+                return [], list(block.get_included_reward_coins())
+        else:
+            return [], []
 
     def get_next_difficulty(self, header_hash: bytes32, new_slot: bool) -> uint64:
         assert self.contains_block(header_hash)
@@ -574,7 +629,20 @@ class Blockchain(BlockchainInterface):
         return await self.block_store.get_block_records_in_range(start, stop)
 
     async def get_header_blocks_in_range(self, start: int, stop: int) -> Dict[bytes32, HeaderBlock]:
-        return await self.block_store.get_header_blocks_in_range(start, stop)
+        hashes = []
+        for height in range(start, stop + 1):
+            hash = self.height_to_hash(uint32(start))
+            hashes.append(hash)
+        blocks: List[FullBlock] = await self.block_store.get_blocks_by_hash(hashes)
+        header_blocks: Dict[bytes32, HeaderBlock] = {}
+        for block in blocks:
+            additions: List[CoinRecord] = await self.coin_store.get_coins_added_at_height(block.height)
+            removed: List[CoinRecord] = await self.coin_store.get_coins_removed_at_height(block.height)
+            header = get_block_header(
+                block, [record.coin for record in additions], [record.coin.name() for record in removed]
+            )
+            header_blocks[header.header_hash] = header
+        return header_blocks
 
     async def get_header_block_by_height(self, height: int, header_hash: bytes32) -> Optional[HeaderBlock]:
         header_dict: Dict[bytes32, HeaderBlock] = await self.get_header_blocks_in_range(height, height)
@@ -603,12 +671,6 @@ class Blockchain(BlockchainInterface):
         if block_record.height not in self.__heights_in_cache.keys():
             self.__heights_in_cache[block_record.height] = set()
         self.__heights_in_cache[block_record.height].add(block_record.header_hash)
-
-    async def get_header_block(self, header_hash: bytes32) -> Optional[HeaderBlock]:
-        block = await self.block_store.get_full_block(header_hash)
-        if block is None:
-            return None
-        return block.get_block_header()
 
     async def persist_sub_epoch_challenge_segments(
         self, sub_epoch_summary_height: uint32, segments: List[SubEpochChallengeSegment]

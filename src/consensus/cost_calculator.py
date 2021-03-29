@@ -1,35 +1,31 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Any
 
 from src.consensus.condition_costs import ConditionCost
-from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
 from src.types.blockchain_format.program import SerializedProgram
 from src.types.condition_opcodes import ConditionOpcode
 from src.types.name_puzzle_condition import NPC
-from src.util.ints import uint16, uint64
+from src.util.ints import uint64
 from src.util.streamable import Streamable, streamable
 
 
 @dataclass(frozen=True)
 @streamable
-class CostResult(Streamable):
-    error: Optional[uint16]
+class NPCResult(Streamable):
+    error: Any
     npc_list: List[NPC]
-    cost: uint64
+    clvm_cost: uint64  # CLVM cost only, cost of conditions and tx size is not included
 
 
 def calculate_cost_of_program(
-    program: SerializedProgram, clvm_cost_ratio_constant: int, strict_mode: bool = False
-) -> CostResult:
+    program: SerializedProgram, npc_result: NPCResult, clvm_cost_ratio_constant: int
+) -> uint64:
     """
     This function calculates the total cost of either a block or a spendbundle
     """
     total_clvm_cost = 0
-    error, npc_list, cost = get_name_puzzle_conditions(program, strict_mode)
-    if error:
-        raise Exception("get_name_puzzle_conditions raised error:" + str(error))
-    total_clvm_cost += cost
-
+    total_clvm_cost += npc_result.clvm_cost
+    npc_list = npc_result.npc_list
     # Add cost of conditions
     npc: NPC
     total_vbyte_cost = 0
@@ -62,4 +58,4 @@ def calculate_cost_of_program(
 
     total_clvm_cost += total_vbyte_cost * clvm_cost_ratio_constant
 
-    return CostResult(error, npc_list, uint64(total_clvm_cost))
+    return uint64(total_clvm_cost)

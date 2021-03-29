@@ -11,8 +11,9 @@ from src.consensus.block_rewards import calculate_base_farmer_reward, calculate_
 from src.consensus.blockchain_interface import BlockchainInterface
 from src.consensus.coinbase import create_farmer_coin, create_pool_coin
 from src.consensus.constants import ConsensusConstants
-from src.consensus.cost_calculator import CostResult, calculate_cost_of_program
+from src.consensus.cost_calculator import NPCResult, calculate_cost_of_program
 from src.full_node.bundle_tools import best_solution_program
+from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
 from src.full_node.signage_point import SignagePoint
 from src.types.blockchain_format.coin import Coin, hash_coin_list
 from src.types.blockchain_format.foliage import Foliage, FoliageBlockData, FoliageTransactionBlock, TransactionsInfo
@@ -125,8 +126,9 @@ def create_foliage(
 
         # Calculate the cost of transactions
         if solution_program is not None:
-            result: CostResult = calculate_cost_of_program(solution_program, constants.CLVM_COST_RATIO_CONSTANT)
-            cost = result.cost
+
+            result: NPCResult = get_name_puzzle_conditions(solution_program, True)
+            cost = calculate_cost_of_program(solution_program, result, constants.CLVM_COST_RATIO_CONSTANT)
             removal_amount = 0
             addition_amount = 0
             for coin in removals:
