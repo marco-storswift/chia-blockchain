@@ -19,4 +19,4 @@ def best_solution_program(bundle: SpendBundle) -> SerializedProgram:
             [coin_solution.puzzle_reveal, coin_solution.solution],
         ]
         r.append(entry)
-    return SerializedProgram.from_bytes(SExp.to((binutils.assemble("#q"), r)).as_bin())
+    return SerializedProgram.from_bytes(SExp.to((binutils.assemble("#q"), r)).as_bin()), SerializedProgram.from_bytes(b"\x80")

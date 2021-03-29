@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from src.consensus.condition_costs import ConditionCost
 from src.full_node.mempool_check_conditions import get_name_puzzle_conditions
+from src.full_node.generator import create_block_program_args
 from src.types.blockchain_format.program import SerializedProgram
 from src.types.condition_opcodes import ConditionOpcode
 from src.types.name_puzzle_condition import NPC
@@ -19,13 +20,14 @@ class CostResult(Streamable):
 
 
 def calculate_cost_of_program(
-    program: SerializedProgram, clvm_cost_ratio_constant: int, strict_mode: bool = False
+    program: SerializedProgram, arguments: SerializedProgram, clvm_cost_ratio_constant: int, strict_mode: bool = False
 ) -> CostResult:
     """
     This function calculates the total cost of either a block or a spendbundle
     """
     total_clvm_cost = 0
-    error, npc_list, cost = get_name_puzzle_conditions(program, strict_mode)
+    generator_args = create_block_program_args(arguments)
+    error, npc_list, cost = get_name_puzzle_conditions(program, generator_args, strict_mode)
     if error:
         raise Exception("get_name_puzzle_conditions raised error:" + str(error))
     total_clvm_cost += cost

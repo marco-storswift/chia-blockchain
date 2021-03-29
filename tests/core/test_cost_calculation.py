@@ -16,7 +16,9 @@ from tests.setup_nodes import bt, test_constants
 from .make_block_generator import make_block_generator
 
 BURN_PUZZLE_HASH = b"0" * 32
-SMALL_BLOCK_GENERATOR = make_block_generator(1)
+gen_and_args = make_block_generator(1)
+SMALL_BLOCK_GENERATOR = gen_and_args[0]
+SMALL_BLOCK_GENERATOR_ARGS = gen_and_args[1]
 
 log = logging.getLogger(__name__)
 
@@ -71,14 +73,14 @@ class TestCostCalculation:
             coinbase,
         )
         assert spend_bundle is not None
-        program = best_solution_program(spend_bundle)
+        program, args = best_solution_program(spend_bundle)
 
         ratio = test_constants.CLVM_COST_RATIO_CONSTANT
 
-        result: CostResult = calculate_cost_of_program(program, ratio)
+        result: CostResult = calculate_cost_of_program(program, args, ratio)
         clvm_cost = result.cost
-
-        error, npc_list, cost = get_name_puzzle_conditions(program, False)
+        args = SerializedProgram.from_bytes(b"\x80")
+        error, npc_list, cost = get_name_puzzle_conditions(program, args, False)
         assert error is None
         coin_name = npc_list[0].coin_name
         error, puzzle, solution = get_puzzle_and_solution_for_coin(program, coin_name)
@@ -121,9 +123,10 @@ class TestCostCalculation:
                 f" ({disassembly} (() (q . ((65 '00000000000000000000000000000000' 0x0cbba106e000))) ())))))"
             ).as_bin()
         )
-        error, npc_list, cost = get_name_puzzle_conditions(program, True)
+        args = SerializedProgram.from_bytes(b"\x80")
+        error, npc_list, cost = get_name_puzzle_conditions(program, args, True)
         assert error is not None
-        error, npc_list, cost = get_name_puzzle_conditions(program, False)
+        error, npc_list, cost = get_name_puzzle_conditions(program, args, False)
         assert error is None
 
         coin_name = npc_list[0].coin_name
@@ -139,9 +142,9 @@ class TestCostCalculation:
         # ("0xfe"). In strict mode, this should fail, but in non-strict
         # mode, the unknown operator should be treated as if it returns ().
         program = SerializedProgram.from_bytes(binutils.assemble(f"(i (0xfe (q . 0)) (q . ()) {disassembly})").as_bin())
-        error, npc_list, cost = get_name_puzzle_conditions(program, True)
+        error, npc_list, cost = get_name_puzzle_conditions(program, SMALL_BLOCK_GENERATOR_ARGS, True)
         assert error is not None
-        error, npc_list, cost = get_name_puzzle_conditions(program, False)
+        error, npc_list, cost = get_name_puzzle_conditions(program, SMALL_BLOCK_GENERATOR_ARGS, False)
         assert error is None
 
     @pytest.mark.asyncio
@@ -149,9 +152,9 @@ class TestCostCalculation:
         LARGE_BLOCK_COIN_CONSUMED_COUNT = 687
         generator = large_block_generator(LARGE_BLOCK_COIN_CONSUMED_COUNT)
         program = SerializedProgram.from_bytes(generator)
-
+        args = SerializedProgram.from_bytes(b"\x80")
         start_time = time.time()
-        err, npc, cost = get_name_puzzle_conditions(program, False)
+        err, npc, cost = get_name_puzzle_conditions(program, args, False)
         end_time = time.time()
         duration = end_time - start_time
         assert err is None
