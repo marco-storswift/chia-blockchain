@@ -67,6 +67,34 @@ class SubSlotData(Streamable):
 
 @dataclass(frozen=True)
 @streamable
+class SubSlotDataV2(Streamable):
+    # if infused
+    proof_of_space: Optional[ProofOfSpace]
+    # VDF to signage point
+    cc_signage_point: Optional[VDFProof]
+    # VDF from signage to infusion point
+    cc_infusion_point: Optional[VDFProof]
+    # icc_infusion_point: Optional[VDFProof]
+    signage_point_index: Optional[uint8]
+    # VDF from beginning to end of slot if not infused
+    #  from ip to end if infused
+    cc_slot_end: Optional[VDFProof]
+    total_iters: Optional[uint128]
+    sp_iters: Optional[uint128]
+
+    def is_challenge(self):
+        if self.proof_of_space is not None:
+            return True
+        return False
+
+    def is_end_of_slot(self):
+        if self.cc_slot_end_info is not None:
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+@streamable
 class SubEpochChallengeSegment(Streamable):
     sub_epoch_n: uint32
     sub_slots: List[SubSlotData]
